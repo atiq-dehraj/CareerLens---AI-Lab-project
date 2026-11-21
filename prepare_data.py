@@ -61,24 +61,25 @@ def prepare_dataset():
             return sal * 12
         return sal
 
-    df['salary'] = df.apply(get_annual_salary, axis=1)
+    annual_salary = pd.to_numeric(
+        df['normalized_salary'], errors='coerce'
+    )
+
+    df['salary'] = annual_salary.where(
+        (df['currency'] == 'USD') & (annual_salary > 0)
+    )
 
     print("Job Level map kiya ja raha hai...")
+
     def map_level(exp_level):
         if pd.isna(exp_level):
-            return 'Mid'
-        exp_level = str(exp_level).lower()
-        if 'entry' in exp_level or 'intern' in exp_level:
-            return 'Junior'
-        elif 'associate' in exp_level or 'mid' in exp_level:
-            return 'Mid'
-        else:
-            return 'Senior'
+            return pd.NA
+        return str(exp_level).strip()
 
     if 'formatted_experience_level' in df.columns:
         df['job_level'] = df['formatted_experience_level'].apply(map_level)
     else:
-        df['job_level'] = 'Mid'
+        df['job_level'] = pd.NA
 
     # Description check
     if 'description' not in df.columns:
@@ -93,7 +94,11 @@ def prepare_dataset():
 
     final_df = df[cols_to_keep].copy()
     
-    final_df.dropna(subset=['job_title', 'company', 'salary'], inplace=True)
+    # Remove only records without a valid job title
+    final_df.dropna(subset=['job_title'], inplace=True)
+
+    # Preserve missing company and salary information
+    final_df['company'] = final_df['company'].fillna('Unknown')
 
     if not os.path.exists('data'):
         os.makedirs('data')

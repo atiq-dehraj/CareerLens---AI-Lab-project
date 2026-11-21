@@ -24,6 +24,10 @@ HEURISTIC = {
     'Machine Learning': 1,
     'Data Scientist': 0
 }
+def heuristic(node, goal):
+    """Admissible heuristic for any target node."""
+    return 0
+
 
 # 1. BFS (Breadth-First Search) - Shortest path by number of edges
 def bfs(graph, start, goal):
@@ -66,7 +70,7 @@ def dfs(graph, start, goal, path=None, visited=None):
 def a_star(graph, start, goal):
     # Priority Queue: (f_score, g_score, current_node, path)
     open_set = []
-    heapq.heappush(open_set, (0 + HEURISTIC.get(start, 0), 0, start, [start]))
+    heapq.heappush(open_set, (0 + heuristic(start, goal), 0, start, [start]))
     visited = set()
     
     while open_set:
@@ -83,7 +87,19 @@ def a_star(graph, start, goal):
         for neighbor, weight in graph.get(current, {}).items():
             if neighbor not in visited:
                 new_g_score = g_score + weight
-                new_f_score = new_g_score + HEURISTIC.get(neighbor, 0)
+                new_f_score = new_g_score + heuristic(neighbor, goal)
                 heapq.heappush(open_set, (new_f_score, new_g_score, neighbor, path + [neighbor]))
                 
     return None, 0
+
+def calculate_path_cost(graph, path):
+    """Calculate total weighted cost of a career path."""
+    if not path:
+        return None
+
+    total_cost = 0
+
+    for current, next_node in zip(path, path[1:]):
+        total_cost += graph[current][next_node]
+
+    return total_cost

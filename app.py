@@ -9,11 +9,45 @@ import os
 from modules.data_loader import load_and_inspect_data
 from modules.preprocessing import clean_data
 from modules.outlier_detection import detect_zscore_outliers, detect_iqr_outliers
-from modules.knn import get_knn_recommendations
+from modules.knn import get_knn_recommendations, predict_job_level
 from modules.kmeans import run_kmeans  
-from modules.decision_tree import build_tree, predict  
-from modules.graph_search import bfs, dfs, a_star, CAREER_GRAPH
+from modules.decision_tree import build_tree, predict
+from modules.decision_tree_features import extract_features
+from modules.graph_search import bfs, dfs, a_star, CAREER_GRAPH, calculate_path_cost
 from modules.live_api import fetch_jsearch_jobs, map_live_to_local_format # Naya Import
+
+@st.cache_data(show_spinner="Analyzing job skills...")
+def calculate_skill_demand(descriptions):
+    skills = [
+        'Python', 'SQL', 'Excel',
+        'Pandas', 'Machine Learning', 'Statistics'
+    ]
+
+    descriptions = descriptions.fillna('').astype(str)
+
+    counts = [
+        int(descriptions.str.contains(
+            rf'\b{skill}\b',
+            case=False,
+            regex=True,
+            na=False
+        ).sum())
+        for skill in skills
+    ]
+
+    total = len(descriptions)
+
+    demands = [
+        round(count / total * 100, 1) if total else 0
+        for count in counts
+    ]
+
+    top_skill = (
+        skills[counts.index(max(counts))]
+        if any(counts) else "N/A"
+    )
+
+    return skills, demands, top_skill
 
 # Page configuration
 st.set_page_config(page_title="CareerLens", page_icon="📊", layout="wide")
@@ -82,6 +116,19 @@ st.markdown("""
         margin-bottom: 15px;
     }
     
+    /* Improve widget label and helper-text contrast */
+    [data-testid="stWidgetLabel"] p,
+    [data-testid="stCheckbox"] label p,
+    [data-testid="stCaptionContainer"] p {
+        color: #374151 !important;
+        opacity: 1 !important;
+    }
+
+    [data-testid="stWidgetLabel"] {
+        color: #374151 !important;
+        opacity: 1 !important;
+    }
+
     /* FIX STREAMLIT WIDGETS (INPUTS, DROPDOWNS, BUTTONS) */
     div[data-baseweb="input"] > div, div[data-baseweb="select"] > div {
         background-color: white !important;
@@ -155,9 +202,18 @@ else:
     if menu == "Market Overview":
         st.markdown("<p style='color: #6b7280; font-size: 16px; margin-top: -10px;'>Dataset summary, top skills and job titles</p><br>", unsafe_allow_html=True)
         
+                # Calculate skill demand using the full dataset
+        skills, demands, top_skill = calculate_skill_demand(
+            df['description']
+        )
         col1, col2, col3, col4 = st.columns(4)
         with col1: st.markdown(f'<div class="custom-card"><h4>Jobs analysed</h4><h2>{df.shape[0]:,}</h2></div>', unsafe_allow_html=True)
-        with col2: st.markdown('<div class="custom-card"><h4>Top skill</h4><h2>Python</h2></div>', unsafe_allow_html=True)
+        with col2:
+            st.markdown(
+                f'<div class="custom-card"><h4>Top tracked skill</h4>'
+                f'<h2>{top_skill}</h2></div>',
+                unsafe_allow_html=True
+            )
         with col3: st.markdown(f'<div class="custom-card"><h4>Median salary</h4><h2>${df["salary"].median():,.0f}</h2></div>', unsafe_allow_html=True)
         with col4: st.markdown(f'<div class="custom-card"><h4>Job categories</h4><h2>{df["job_title"].nunique()}</h2></div>', unsafe_allow_html=True)
             
@@ -166,8 +222,6 @@ else:
         col_chart1, col_chart2 = st.columns([1.5, 1])
         with col_chart1:
             st.markdown('<div class="chart-box"><h4>Skill demand (% of postings)</h4>', unsafe_allow_html=True)
-            skills = ['Python', 'SQL', 'Excel', 'Pandas', 'Machine Learning', 'Statistics']
-            demands = [92, 81, 66, 58, 47, 41]
             fig1, ax1 = plt.subplots(figsize=(8, 4))
             fig1.patch.set_facecolor('white')
             ax1.barh(skills[::-1], demands[::-1], color='#00796b', height=0.6)
@@ -193,72 +247,132 @@ else:
         col_input1, col_input2, col_input3, col_input4 = st.columns(4)
         with col_input1: st.text_input("Salary field", "salary", disabled=True)
         with col_input2: st.text_input("Method", "Z-score + IQR", disabled=True)
-        with col_input3: z_thresh = st.number_input("Z threshold", value=3.0, step=0.5)
+        with col_input3: z_thresh = st.number_input(
+    "Z threshold", min_value=0.5, value=3.0, step=0.5
+)
         with col_input4: st.text_input("Currency / unit", "USD / year", disabled=True)
         
         if st.button("Run Analysis"):
             outliers_z, count_z = detect_zscore_outliers(df, threshold=z_thresh)
             outliers_iqr, stats_iqr = detect_iqr_outliers(df)
-            
-            col_chart1, col_chart2 = st.columns([1.5, 1])
-            with col_chart1:
-                st.markdown('<div class="chart-box"><h4>Salary distribution</h4>', unsafe_allow_html=True)
-                fig, ax = plt.subplots(figsize=(8, 4))
-                fig.patch.set_facecolor('white')
-                ax.hist(df['salary'], bins=30, color='#00796b', edgecolor='white')
-                ax.spines['top'].set_visible(False); ax.spines['right'].set_visible(False)
-                ax.tick_params(colors='#374151')
-                ax.set_xlabel("Salary (USD / year)", color='#374151')
+            col_metric1, col_metric2, col_metric3 = st.columns(3)
+
+            with col_metric1:
+                st.metric("Valid Salary Records", df["salary"].notna().sum())
+
+            with col_metric2:
+                st.metric("Z-score Outliers", count_z)
+
+            with col_metric3:
+                st.metric("IQR Outliers", len(outliers_iqr))
+
+            # Salary distribution and IQR outlier boundaries
+            valid_salaries = pd.to_numeric(
+                df["salary"], errors="coerce"
+            )
+            valid_salaries = valid_salaries[
+                np.isfinite(valid_salaries) & (valid_salaries > 0)
+            ]
+
+            if not valid_salaries.empty and stats_iqr:
+                st.subheader("Salary Distribution & IQR Boundaries")
+
+                fig, ax = plt.subplots(figsize=(10, 4))
+                # Limit the chart range to improve readability.
+                # Outlier calculations still use all valid salaries.
+                display_limit = valid_salaries.quantile(0.99)
+                display_salaries = valid_salaries[
+                    valid_salaries <= display_limit
+                ]
+
+                ax.hist(
+                    display_salaries,
+                    bins=50,
+                    color="#00796b",
+                    alpha=0.75,
+                    edgecolor="white"
+                )
+                ax.set_xlim(0, display_limit)
+
+                ax.axvline(
+                    stats_iqr["Lower Fence"],
+                    color="#d97706",
+                    linestyle="--",
+                    label="IQR Lower Fence"
+                )
+                ax.axvline(
+                    stats_iqr["Upper Fence"],
+                    color="#be123c",
+                    linestyle="--",
+                    label="IQR Upper Fence"
+                )
+
+                ax.set_xlabel("Annual Salary (USD)")
+                ax.set_ylabel("Number of Job Postings")
+                ax.legend()
+                ax.spines["top"].set_visible(False)
+                ax.spines["right"].set_visible(False)
+
                 st.pyplot(fig)
-                st.markdown('</div>', unsafe_allow_html=True)
-                
-            with col_chart2:
-                st.markdown('<div class="chart-box"><h4>Quartiles and fences</h4>', unsafe_allow_html=True)
-                q_df = pd.DataFrame({
-                    "Statistic": ["Q1", "Median", "Q3", "IQR", "Lower fence", "Upper fence"],
-                    "Value": [f"${stats_iqr['Q1']:,.0f}", f"${stats_iqr['Median']:,.0f}", f"${stats_iqr['Q3']:,.0f}", 
-                              f"${stats_iqr['IQR']:,.0f}", f"${stats_iqr['Lower Fence']:,.0f}", f"${stats_iqr['Upper Fence']:,.0f}"]
-                })
-                st.dataframe(q_df, hide_index=True, use_container_width=True)
-                st.markdown('</div>', unsafe_allow_html=True)
-                
-            st.markdown('<div class="chart-box"><h4>Flagged records (review, do not auto-delete)</h4>', unsafe_allow_html=True)
-            if not outliers_z.empty:
-                st.dataframe(outliers_z[['job_title', 'salary', 'z_score']].head(5).rename(columns={'job_title':'Job', 'salary':'Salary', 'z_score':'Z-score'}), use_container_width=True)
-            else:
-                st.success("No flagged records found.")
-            st.markdown('</div>', unsafe_allow_html=True)
+                plt.close(fig)
+
+
 
     # ==========================================
     # 3. KNN RECOMMENDATIONS
     # ==========================================
     elif menu == "KNN Recommendations":
-        st.markdown("<p style='color: #6b7280; font-size: 16px; margin-top: -10px;'>Find the K most similar postings and predict a level</p><br>", unsafe_allow_html=True)
-        
-        col_left, col_right = st.columns([1, 2])
-        
-        with col_left:
-            st.markdown('<div class="chart-box"><h4>Query profile</h4>', unsafe_allow_html=True)
-            query_salary = st.number_input("Expected salary ($)", min_value=10000, max_value=500000, value=75000, step=5000)
-            k_value = st.slider("K (neighbours)", min_value=1, max_value=10, value=5)
-            run_knn = st.button("Run KNN")
-            st.markdown('</div>', unsafe_allow_html=True)
-            
-        with col_right:
-            if run_knn:
-                nearest_df = get_knn_recommendations(df, query_salary, k=k_value)
-                
-                st.markdown(f'<div class="chart-box"><h4>{k_value} nearest postings</h4>', unsafe_allow_html=True)
-                display_df = nearest_df[['job_title', 'company', 'salary', 'distance']].reset_index(drop=True)
-                display_df.index = display_df.index + 1
-                display_df.columns = ['Job title', 'Company', 'Salary', 'Distance']
-                st.dataframe(display_df, use_container_width=True)
-                st.markdown('</div>', unsafe_allow_html=True)
-                
-                st.markdown('<div class="chart-box"><h4>Predicted level (majority vote)</h4>', unsafe_allow_html=True)
-                st.markdown(f"<h2 style='color:#00796b; margin-bottom:0;'>Mid-level</h2>", unsafe_allow_html=True)
-                st.markdown(f"<p style='color:gray; font-size:14px;'>{k_value} neighbours · features min-max scaled · Euclidean distance</p>", unsafe_allow_html=True)
-                st.markdown('</div>', unsafe_allow_html=True)
+        st.caption("Find job postings with salaries closest to your target.")
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            target_salary = st.number_input(
+                "Target Annual Salary (USD)",
+                min_value=1,
+                value=80000,
+                step=5000
+            )
+
+        with col2:
+            k_neighbors = st.number_input(
+                "Number of Neighbors (K)",
+                min_value=1,
+                max_value=20,
+                value=5,
+                step=1
+            )
+
+        if st.button("Find Recommendations"):
+            nearest_jobs = get_knn_recommendations(
+                df, target_salary, k=int(k_neighbors)
+            )
+
+            if nearest_jobs.empty:
+                st.warning("No matching jobs with valid salaries were found.")
+            else:
+                predicted_level = predict_job_level(nearest_jobs)
+
+                st.success(
+                    f"Found {len(nearest_jobs)} nearest job postings."
+                )
+
+                if predicted_level is not None:
+                    st.metric("Predicted Job Level", predicted_level)
+                else:
+                    st.info("Job level unavailable for these recommendations.")
+
+                display_columns = [
+                    col for col in
+                    ["job_title", "company", "salary", "job_level", "distance"]
+                    if col in nearest_jobs.columns
+                ]
+
+                st.dataframe(
+                    nearest_jobs[display_columns],
+                    hide_index=True,
+                    use_container_width=True
+                )
 
     # ==========================================
     # 4. K-MEANS CLUSTERING
@@ -272,12 +386,46 @@ else:
         with col3: k_clusters = st.number_input("K (clusters)", min_value=2, max_value=8, value=3)
         with col4: st.text_input("Max iterations", "100", disabled=True)
         
+        apply_iqr = st.checkbox(
+            "Exclude salary outliers using IQR",
+            value=True
+        )
+
         if st.button("Run K-Means"):
-            clustered_df, centroids = run_kmeans(df, column='salary', k=k_clusters)
+            clustering_df = df.copy()
+
+            if apply_iqr:
+                salaries = pd.to_numeric(
+                    clustering_df["salary"], errors="coerce"
+                )
+                valid = salaries[
+                    np.isfinite(salaries) & (salaries > 0)
+                ]
+
+                if not valid.empty:
+                    q1 = valid.quantile(0.25)
+                    q3 = valid.quantile(0.75)
+                    iqr = q3 - q1
+
+                    lower = q1 - 1.5 * iqr
+                    upper = q3 + 1.5 * iqr
+
+                    clustering_df = clustering_df[
+                        (salaries >= lower) & (salaries <= upper)
+                    ].copy()
+
+            clustered_df, centroids = run_kmeans(
+                clustering_df, column="salary", k=k_clusters
+            )
+
+            st.caption(
+                f"Clustered {len(clustered_df):,} postings · "
+                f"IQR filtering {'enabled' if apply_iqr else 'disabled'}"
+            )
             
             col_chart1, col_chart2 = st.columns([1.5, 1])
             with col_chart1:
-                st.markdown('<div class="chart-box"><h4>Cluster plot</h4>', unsafe_allow_html=True)
+                st.subheader("Cluster plot")
                 fig, ax = plt.subplots(figsize=(8, 5))
                 fig.patch.set_facecolor('white')
                 colors = ['#00796b', '#d97706', '#4f46e5', '#be123c', '#10b981']
@@ -291,62 +439,125 @@ else:
                 
                 ax.spines['top'].set_visible(False); ax.spines['right'].set_visible(False)
                 ax.set_xlabel("Job Index", color='#374151')
-                ax.set_ylabel("Salary (k USD)", color='#374151')
+                ax.set_ylabel("Annual Salary (USD)", color='#374151')
                 ax.legend()
                 st.pyplot(fig)
-                st.markdown('</div>', unsafe_allow_html=True)
                 
             with col_chart2:
-                st.markdown('<div class="chart-box"><h4>Centroids and sizes</h4>', unsafe_allow_html=True)
+                st.subheader("Centroids and sizes")
                 summary = clustered_df.groupby('cluster')['salary'].agg(['count', 'mean']).reset_index()
                 summary.columns = ['Cluster', 'Size', 'Avg Salary']
                 summary['Avg Salary'] = summary['Avg Salary'].apply(lambda x: f"${x:,.0f}")
                 st.dataframe(summary, hide_index=True, use_container_width=True)
-                st.markdown('</div>', unsafe_allow_html=True)
 
+    # ==========================================
     # ==========================================
     # 5. DECISION TREE
     # ==========================================
     elif menu == "Decision Tree":
-        st.markdown("<p style='color: #6b7280; font-size: 16px; margin-top: -10px;'>Train a tree and trace the decision path</p><br>", unsafe_allow_html=True)
-        
-        if 'job_level' not in df.columns:
-            st.error("Dataset mein 'job_level' column nahi hai. Please run prepare_data.py first.")
-        else:
-            col1, col2, col3, col4 = st.columns(4)
-            with col1: st.text_input("Target label", "job_level", disabled=True)
-            with col2: st.text_input("Split criterion", "Gini impurity", disabled=True)
-            with col3: depth = st.number_input("Max depth", min_value=1, max_value=10, value=3)
-            with col4: st.text_input("Min samples", "20", disabled=True)
-            
-            test_salary = st.number_input("Enter Salary to Predict Job Level:", min_value=30000, max_value=300000, value=95000, step=5000)
-            
-            if st.button("Train & Predict"):
-                X = df[['salary']].values
-                y = df['job_level'].values
-                tree = build_tree(X, y, max_depth=depth)
-                prediction = predict(tree, [test_salary])
-                
+        st.caption("Predict job seniority using salary and job-title features")
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            job_title = st.text_input(
+                "Job title",
+                value="Senior Python Developer"
+            )
+
+        with col2:
+            test_salary = st.number_input(
+                "Annual salary (USD)",
+                min_value=1,
+                max_value=1000000,
+                value=95000,
+                step=5000
+            )
+
+        depth = st.slider("Maximum tree depth", 1, 10, 3)
+
+        if st.button("Train & Predict"):
+            training_df = df.copy()
+
+            training_df["salary"] = pd.to_numeric(
+                training_df["salary"], errors="coerce"
+            )
+
+            training_df = training_df[
+                training_df["job_level"].notna()
+                & np.isfinite(training_df["salary"])
+                & (training_df["salary"] > 0)
+            ].copy()
+
+            if len(training_df) < 2:
+                st.error("Not enough valid training records.")
+            else:
+                q1 = training_df["salary"].quantile(0.25)
+                q3 = training_df["salary"].quantile(0.75)
+                iqr = q3 - q1
+
+                training_df = training_df[
+                    training_df["salary"].between(
+                        q1 - 1.5 * iqr,
+                        q3 + 1.5 * iqr
+                    )
+                ].copy()
+
+                features = extract_features(training_df)
+                X = features.to_numpy()
+                y = training_df["job_level"].to_numpy()
+
+                with st.spinner("Training Decision Tree..."):
+                    tree = build_tree(X, y, max_depth=depth)
+
+                sample = pd.DataFrame({
+                    "job_title": [job_title],
+                    "salary": [test_salary]
+                })
+
+                sample_features = extract_features(sample)
+                sample_features = sample_features[features.columns]
+                sample_values = sample_features.iloc[0].to_numpy()
+
+                prediction = predict(tree, sample_values)
+
+                st.success(f"Predicted job level: {prediction}")
+                st.caption(
+                    f"Trained on {len(training_df):,} records "
+                    f"using {X.shape[1]} features"
+                )
+
                 col_tree, col_pred = st.columns([2, 1])
-                
+
                 with col_tree:
-                    st.markdown('<div class="chart-box"><h4>Tree structure & decision path</h4>', unsafe_allow_html=True)
+                    st.subheader("Decision path")
+
                     current_node = tree
-                    path_text = ""
+
                     while current_node.value is None:
-                        if test_salary <= current_node.threshold:
-                            path_text += f"Salary <= {current_node.threshold:,.0f} → Go Left<br>"
+                        feature_idx = current_node.feature
+                        feature_name = features.columns[feature_idx]
+                        threshold = current_node.threshold
+                        value = sample_values[feature_idx]
+
+                        if value <= threshold:
+                            st.write(
+                                f"{feature_name}: {value:,.0f} "
+                                f"≤ {threshold:,.0f} → Left"
+                            )
                             current_node = current_node.left
                         else:
-                            path_text += f"Salary > {current_node.threshold:,.0f} → Go Right<br>"
+                            st.write(
+                                f"{feature_name}: {value:,.0f} "
+                                f"> {threshold:,.0f} → Right"
+                            )
                             current_node = current_node.right
-                    st.markdown(f"<p style='font-family: monospace; font-size: 16px;'>{path_text}</p>", unsafe_allow_html=True)
-                    st.markdown('</div>', unsafe_allow_html=True)
-                    
+
+                    st.write(f"Leaf prediction: **{current_node.value}**")
+
                 with col_pred:
-                    st.markdown('<div class="chart-box"><h4>Prediction</h4>', unsafe_allow_html=True)
-                    st.markdown(f"<h2 style='color:#00796b;'>{prediction}</h2>", unsafe_allow_html=True)
-                    st.markdown('</div>', unsafe_allow_html=True)
+                    st.subheader("Prediction")
+                    st.metric("Job level", prediction)
 
     # ==========================================
     # 6. CAREER PATH FINDER
@@ -374,9 +585,45 @@ else:
             
             pos = nx.spring_layout(G, k=1.5, seed=42)
             
-            nx.draw_networkx_nodes(G, pos, node_size=8000, node_color='#00796b', ax=ax)
-            nx.draw_networkx_labels(G, pos, font_color='white', font_size=9, font_weight='bold', ax=ax)
-            nx.draw_networkx_edges(G, pos, arrowstyle='->', arrowsize=20, edge_color='#9ca3af', width=2, ax=ax)
+            nx.draw_networkx_nodes(G, pos, node_size=3500, node_color='#00796b', ax=ax)
+            node_labels = {
+                "Machine Learning": "Machine\nLearning",
+                "Data Scientist": "Data\nScientist",
+                "Visualization": "Visualization",
+            }
+
+            labels = {node: node_labels.get(node, node) for node in G.nodes()}
+
+            nx.draw_networkx_labels(
+                G, pos,
+                labels=labels,
+                font_color='white',
+                font_size=8,
+                font_weight='bold',
+                ax=ax
+            )
+            a_path, a_cost = a_star(CAREER_GRAPH, start_node, goal_node)
+
+            highlighted_edges = set(zip(a_path, a_path[1:])) if a_path else set()
+
+            edge_colors = [
+                '#ef4444' if edge in highlighted_edges else '#9ca3af'
+                for edge in G.edges()
+            ]
+
+            edge_widths = [
+                4 if edge in highlighted_edges else 2
+                for edge in G.edges()
+            ]
+
+            nx.draw_networkx_edges(
+                G, pos,
+                arrowstyle='->',
+                arrowsize=20,
+                edge_color=edge_colors,
+                width=edge_widths,
+                ax=ax
+            )
             
             ax.axis('off')
             st.pyplot(fig)
@@ -391,7 +638,7 @@ else:
                 "Algorithm": ["BFS", "DFS", "A*"],
                 "Path": [" → ".join(bfs_path) if bfs_path else "None", " → ".join(dfs_path) if dfs_path else "None", " → ".join(a_path) if a_path else "None"],
                 "Edges": [len(bfs_path)-1 if bfs_path else 0, len(dfs_path)-1 if dfs_path else 0, len(a_path)-1 if a_path else 0],
-                "Cost": [f"{bfs_cost*40} h" if bfs_cost else "N/A", f"{dfs_cost*40} h" if dfs_cost else "N/A", f"{a_cost*40} h" if a_cost else "N/A"]
+                "Cost": [f"{calculate_path_cost(CAREER_GRAPH, path)*40} h" if path else "N/A" for path in (bfs_path, dfs_path, a_path)]
             })
             st.dataframe(algo_df, hide_index=True, use_container_width=True)
             st.markdown('</div>', unsafe_allow_html=True)
@@ -407,7 +654,7 @@ else:
         col1, col2, col3 = st.columns(3)
         with col1: 
             # Security ke liye type="password" use kiya hai. Apni key yahan daalein.
-            rapidapi_key = st.text_input("RapidAPI Key", type="password", value="e8856e1a1cmsh7114718c35df35ep1786d6jsnb5fce9ef938a")
+            rapidapi_key = st.text_input("RapidAPI Key", type="password")
         with col2: 
             query = st.text_input("Job Title", "Data Scientist")
         with col3: 

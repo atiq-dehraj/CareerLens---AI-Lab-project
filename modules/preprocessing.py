@@ -1,21 +1,29 @@
 import pandas as pd
 import numpy as np
 
+
 def clean_data(df):
-    # 1. Duplicate rows hatao
-    df = df.drop_duplicates()
-    
-    # 2. Missing values handle karo (Important columns ke liye)
-    # Agar job_title ya company missing hai, toh us row ka faida nahi
-    df = df.dropna(subset=['job_title', 'company'])
-    
-    # 3. Salary ko numeric banao (agar string mein hai toh)
+    # Work on a copy of the original dataset
+    df = df.copy()
+
+    # Remove only records without job titles
+    df = df.dropna(subset=['job_title']).copy()
+
+    # Preserve records with missing company names
+    df['company'] = df['company'].fillna('Unknown')
+
+    # Convert salaries to numeric values
     if 'salary' in df.columns:
-        df['salary'] = pd.to_numeric(df['salary'], errors='coerce')
-        
-    # 4. Missing salary ko median se fill karo (ya drop kar sakte hain, par abhi fill kar rahe hain)
-    if 'salary' in df.columns:
-        median_salary = df['salary'].median()
-        df['salary'] = df['salary'].fillna(median_salary)
-        
+        df['salary'] = pd.to_numeric(
+            df['salary'], errors='coerce'
+        )
+
+        # Keep only positive salary values
+        df['salary'] = df['salary'].where(
+            df['salary'] > 0
+        )
+
+    # Do not fill missing salaries with the median.
+    # Do not remove duplicates without a reliable job ID.
+
     return df

@@ -1,3 +1,5 @@
+networkx
+requests
 streamlit
 pandas
 numpy

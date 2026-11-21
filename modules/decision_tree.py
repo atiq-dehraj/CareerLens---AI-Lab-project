@@ -21,42 +21,73 @@ def calculate_gini(y):
 
 # Best split dhoondho
 def get_best_split(X, y):
-    best_gini = float('inf')
+    n_samples, n_features = X.shape
+
+    if n_samples < 2:
+        return None, None
+
+    classes, encoded_y = np.unique(y, return_inverse=True)
+    n_classes = len(classes)
+
+    parent_gini = calculate_gini(y)
+    best_gini = parent_gini
     best_feature = None
     best_threshold = None
 
-    for feature_idx in range(X.shape[1]):
-        thresholds = np.unique(X[:, feature_idx])
-        for t in thresholds:
-            left_mask = X[:, feature_idx] <= t
-            right_mask = X[:, feature_idx] > t
-            
-            if len(y[left_mask]) == 0 or len(y[right_mask]) == 0:
+    for feature_idx in range(n_features):
+        order = np.argsort(X[:, feature_idx], kind="mergesort")
+        values = X[order, feature_idx]
+        labels = encoded_y[order]
+
+        left_counts = np.zeros(n_classes, dtype=np.int64)
+        right_counts = np.bincount(
+            labels, minlength=n_classes
+        ).astype(np.int64)
+
+        for i in range(n_samples - 1):
+            class_idx = labels[i]
+            left_counts[class_idx] += 1
+            right_counts[class_idx] -= 1
+
+            if values[i] == values[i + 1]:
                 continue
-                
-            gini_left = calculate_gini(y[left_mask])
-            gini_right = calculate_gini(y[right_mask])
-            
-            # Weighted Gini
-            weighted_gini = (len(y[left_mask]) / len(y)) * gini_left + (len(y[right_mask]) / len(y)) * gini_right
-            
-            if weighted_gini < best_gini:
+
+            n_left = i + 1
+            n_right = n_samples - n_left
+
+            gini_left = 1 - np.sum(
+                (left_counts / n_left) ** 2
+            )
+            gini_right = 1 - np.sum(
+                (right_counts / n_right) ** 2
+            )
+
+            weighted_gini = (
+                n_left * gini_left +
+                n_right * gini_right
+            ) / n_samples
+
+            if weighted_gini < best_gini - 1e-12:
                 best_gini = weighted_gini
                 best_feature = feature_idx
-                best_threshold = t
-                
+                best_threshold = values[i]
+
     return best_feature, best_threshold
+
+def majority_class(y):
+    classes, counts = np.unique(y, return_counts=True)
+    return classes[np.argmax(counts)]
 
 # Recursive Tree Build
 def build_tree(X, y, depth=0, max_depth=3):
     # Stopping criteria: Agar sab same class hain ya depth limit cross ho gayi
     if len(np.unique(y)) == 1 or depth >= max_depth:
-        return TreeNode(value=np.unique(y)[0])
+        return TreeNode(value=majority_class(y))
 
     best_feature, best_threshold = get_best_split(X, y)
     
     if best_feature is None:
-        return TreeNode(value=np.unique(y)[0])
+        return TreeNode(value=majority_class(y))
 
     left_mask = X[:, best_feature] <= best_threshold
     right_mask = X[:, best_feature] > best_threshold
